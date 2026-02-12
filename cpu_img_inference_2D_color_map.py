@@ -12,8 +12,11 @@ import importlib
 
 INPUT_IMAGE_PATH = "/kaggle/input/digsite-images/Construction - 12.jpg"
 GROUNDING_MODEL_ID = "IDEA-Research/grounding-dino-base"
-SAM_V3_MODEL_ID = "facebook/sam3-hiera-large"
-SAM_FALLBACK_MODEL_ID = "facebook/sam2.1-hiera-large"
+SAM_MODEL_CANDIDATES = [
+    "facebook/sam3-hiera-large",
+    "facebook/sam2-hiera-large",
+    "facebook/sam-vit-huge",
+]
 TEXT_PROMPT = "ladder. safety cones. digsite."
 
 
@@ -40,20 +43,37 @@ def _load_hf_models(device: torch.device):
     SamProcessor = getattr(transformers, "SamProcessor")
     SamModel = getattr(transformers, "SamModel")
 
-    grounding_processor = AutoProcessor.from_pretrained(GROUNDING_MODEL_ID)
+    hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    hf_kwargs = {"token": hf_token} if hf_token else {}
+
+    grounding_processor = AutoProcessor.from_pretrained(GROUNDING_MODEL_ID, **hf_kwargs)
     grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(
-        GROUNDING_MODEL_ID
+        GROUNDING_MODEL_ID,
+        **hf_kwargs,
     ).to(device)
     grounding_model.eval()
 
-    sam_model_id = SAM_V3_MODEL_ID
-    try:
-        sam_processor = SamProcessor.from_pretrained(sam_model_id)
-        sam_model = SamModel.from_pretrained(sam_model_id).to(device)
-    except Exception:
-        sam_model_id = SAM_FALLBACK_MODEL_ID
-        sam_processor = SamProcessor.from_pretrained(sam_model_id)
-        sam_model = SamModel.from_pretrained(sam_model_id).to(device)
+    sam_model_id = None
+    sam_processor = None
+    sam_model = None
+    sam_errors = []
+    for candidate_model_id in SAM_MODEL_CANDIDATES:
+        try:
+            sam_processor = SamProcessor.from_pretrained(candidate_model_id, **hf_kwargs)
+            sam_model = SamModel.from_pretrained(candidate_model_id, **hf_kwargs).to(device)
+            sam_model_id = candidate_model_id
+            break
+        except Exception as exc:
+            sam_errors.append(f"{candidate_model_id}: {type(exc).__name__}: {exc}")
+
+    if sam_model is None or sam_processor is None or sam_model_id is None:
+        error_text = "\n".join(sam_errors)
+        raise RuntimeError(
+            "Failed to load any SAM model from Hugging Face Hub. "
+            "If you are using gated/private repos, set HF_TOKEN. "
+            f"Tried: {SAM_MODEL_CANDIDATES}. Errors:\n{error_text}"
+        )
+
     sam_model.eval()
 
     return (
